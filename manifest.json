@@ -1,0 +1,71 @@
+{
+    "name": "adskipper",
+    "version": "0.1",
+    "manifest_version": 3,
+    "description": "Skips ads according to snapshots recorded by the user.",
+    "author": "allen@tkzt.cn",
+    "icons": {
+        "16": "/icons/16x16.png",
+        "19": "/icons/19x19.png",
+        "38": "/icons/38x38.png",
+        "48": "/icons/48x48.png",
+        "128": "/icons/128x128.png"
+    },
+    "background": {
+        "service_worker": "scripts/service-worker.js"
+    },
+    "action": {
+        "default_popup": "popup.html",
+        "default_icon": {
+            "16": "/icons/16x16.png",
+            "19": "/icons/19x19.png",
+            "38": "/icons/38x38.png",
+            "48": "/icons/48x48.png",
+            "128": "/icons/128x128.png"
+        }
+    },
+    "content_scripts": [
+        {
+            "js": [
+                "scripts/content.js"
+            ],
+            "matches": [
+                "<all_urls>"
+            ]
+        },
+        {
+            "js": [
+                "scripts/unocss.runtime.js"
+            ],
+            "matches": [
+                "<all_urls>"
+            ]
+        }
+    ],
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "images/speeding-up.svg"
+            ],
+            "matches": [
+                "<all_urls>"
+            ]
+        }
+    ],
+    "commands": {
+        "markAds": {
+            "description": "Mark ads",
+            "suggested_key": "Alt+G"
+        },
+        "enableAdsCheck": {
+            "description": "Enable ads checking",
+            "suggested_key": "Alt+B"
+        }
+    },
+    "permissions": [
+        "storage",
+        "activeTab",
+        "notifications"
+    ],
+    "homepage_url": "https://github.com/tkzt/adskipper"
+}

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <script src="scripts/popup.js"></script>
+    <script src="scripts/unocss.runtime.js"></script>
+</head>
+
+<body class="w-50">
+    <div class="flex flex-col gap4 p2">
+        <div class="flex items-center gap4 justify-between">
+            <label class="text-gray-700">
+                Enable
+                <code class="code">Alt + B</code>
+            </label>
+            <label
+                class="shrink-0 inline-flex items-center cursor-pointer rd-full bg-gray-300 h-5.25 w-9.5 has-[>input:checked]:bg-indigo p.37">
+                <input class="size-0 op-0 m0 peer" type="checkbox" id="detectingEnableSwitch" />
+                <span
+                    class="transition-ease-in peer-checked:translate-x-4.25 flex h-5.25 w-5.25 bg-white items-center justify-center select-none pointer-events-none rd-full of-hidden" />
+            </label>
+        </div>
+
+        <button id="markAdsBtn"
+            class="p2 bg-indigo b-0 rounded-lg cursor-pointer hover:bg-indigo-500 active:bg-indigo-600 c-white">Mark
+            ads (Alt
+            + G)</button>
+    </div>
+</body>
+
+</html>
