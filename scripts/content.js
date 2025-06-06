@@ -13,9 +13,9 @@ window.__unocss = {
   ]
 }
 
+const DETECT_ADS_INTERVAL = 1000; // 1 second
 let adsDetectingEnabled = false;
-const DETECT_ADS_INTERVAL = 1200; // 1.2 seconds
-
+let templateFrame = null;
 
 function videoSpeedUp(duration) {
   const video = getVideoElement();
@@ -23,13 +23,23 @@ function videoSpeedUp(duration) {
     console.error("No video element found to speed up");
     return Promise.reject("No video element found");
   }
+
+  const speedUpContainer = document.createElement('div');
+  speedUpContainer.classList.add('speeding-up-container');
+  const speedUpIcon = document.createElement('img');
+  speedUpIcon.src = chrome.runtime.getURL('assets/speeding-up.svg');
+  speedUpIcon.classList.add('speeding-up-icon');
+  speedUpContainer.appendChild(speedUpIcon);
+  getRootElement().appendChild(speedUpContainer);
+  video.muted = true; // Mute video during speed up
+
   return new Promise((resolve) => {
-    video
-    video.playbackRate = 16;
+    video.currentTime += duration / 1000;
     setTimeout(() => {
-      video.playbackRate = 1.0; // Reset playback speed after duration
-      resolve();
-    }, duration / video.playbackRate);
+      speedUpContainer.remove();
+      video.muted = false; // Unmute video after speed up
+      setTimeout(resolve, DETECT_ADS_INTERVAL);
+    }, DETECT_ADS_INTERVAL);
   })
 }
 
@@ -51,34 +61,68 @@ function getVideoElement() {
   return video;
 }
 
-function checkAds() {
+function captureVideoFrame(frameSize) {
+  const video = getVideoElement();
+  if (!video) {
+    console.error("No video element found to capture frame");
+    return null;
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = frameSize;
+  canvas.height = frameSize;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    console.error("Failed to get canvas context");
+    return null;
+  }
+  context.drawImage(video, video.videoWidth - frameSize, video.videoHeight - frameSize, frameSize, frameSize, 0, 0, frameSize, frameSize);
+  const base64Image = canvas.toDataURL('image/png');
+  return base64Image;
+}
+
+function checkAds(adsId) {
+  const videoFrame = captureVideoFrame(150);
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({
+      action: "checkAds",
+      videoFrame,
+      adsId
+    }, (response) => {
+      const { status, data } = response;
+      if (status === 'success') {
+        console.log("Ads checking finished.");
+        resolve(data);
+      } else {
+        console.error("Failed to check ads.");
+        resolve(null);
+      }
+    });
+  })
+}
+
+function checkAdsTimer() {
   if (!adsDetectingEnabled) {
     console.log("Ads detecting is disabled, skipping check.");
     return;
   }
-  chrome.runtime.sendMessage({
-    action: "checkAds",
-  }, (response) => {
-    const { status, data } = response;
-    if (status === 'success') {
-      console.log("Ads checking finished.");
-      if (data.adsFound) {
-        videoSpeedUp(data.duration).then(() => {
-          console.log("Video sped up.");
-          setTimeout(checkAds, DETECT_ADS_INTERVAL);
-        }
-        ).catch((error) => {
-          console.error("Error speeding up video:", error);
-        });
-        return;
+  checkAds().then((data) => {
+    if (data?.adsFound) {
+      adsDetectingEnabled = false; // Disable ads detecting after finding an ad
+      console.log("Ads found, speeding up video.");
+      videoSpeedUp(data.duration).then(() => {
+        console.log("Video sped up.");
+        adsDetectingEnabled = true; // Re-enable ads detecting after speeding up
+        setTimeout(checkAdsTimer, DETECT_ADS_INTERVAL);
       }
-      setTimeout(
-        checkAds
-        , DETECT_ADS_INTERVAL);
-    } else {
-      console.error("Failed to check ads.");
+      ).catch((error) => {
+        console.error("Error speeding up video:", error);
+      });
+      return
     }
-  });
+    console.log("No ads found, continuing to check.");
+    setTimeout(checkAdsTimer, DETECT_ADS_INTERVAL);
+  })
+
 }
 
 function toast(message) {
@@ -98,7 +142,7 @@ function toast(message) {
   });
 }
 
-function openSetDurationForm(adsId) {
+function markAds() {
   document.querySelector('.form-overlay')?.remove();
   const video = getVideoElement();
   if (!video) {
@@ -137,16 +181,16 @@ function openSetDurationForm(adsId) {
     }
     console.log("Setting ads duration to:", duration);
     chrome.runtime.sendMessage({
-      action: "updateDuration",
+      action: "saveAdsTemplate",
       duration,
-      adsId,
+      templateFrame,
     }, (response) => {
       if (response.status === 'success') {
         formOverlay.remove();
         video?.play();
-        toast('Duration saved.');
+        toast('Ads marked.');
       } else {
-        toast("Failed to set ads duration: " + response.message);
+        toast("Failed mark ads: " + response.message);
       }
     });
   });
@@ -158,7 +202,6 @@ function openSetDurationForm(adsId) {
   getRootElement().appendChild(formOverlay);
   video?.pause();
 }
-
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log("Received message:", message);
@@ -175,11 +218,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     adsDetectingEnabled = message.enabled ?? !adsDetectingEnabled;
     console.log("Ads detecting enabled:", adsDetectingEnabled);
     toast(`Ads detecting ${adsDetectingEnabled ? 'enabled' : 'disabled'}`)
-    checkAds();
+    checkAdsTimer();
     sendResponse({ status: "success" });
-  } else if (message.action === 'openSetDurationForm') {
+  } else if (message.action === 'markAds') {
     console.log("Opening set duration form");
-    openSetDurationForm(message.adsId);
+    templateFrame = captureVideoFrame(150);
+    markAds();
   }
   return true;
 });

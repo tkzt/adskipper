@@ -45,7 +45,7 @@
     "web_accessible_resources": [
         {
             "resources": [
-                "images/speeding-up.svg"
+                "assets/speeding-up.svg"
             ],
             "matches": [
                 "<all_urls>"

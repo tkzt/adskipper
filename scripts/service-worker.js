@@ -1,6 +1,6 @@
 const ADS_DB_KEY = 'AdsDB';
 const STORE_NAME = 'AdsTemplates';
-
+const ADS_THRESHOLD = 0.95; // Confidence threshold for ad detection
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -48,80 +48,6 @@ function getHost(url) {
 }
 
 /**
- * Match template with image using normalized cross-correlation algorithm.
- * 
- * @param {Uint8Array} templateData - Pixel data of the template image (smaller image)
- * @param {Uint8Array} searchData - Pixel data of the image to search in (larger image)
- * @param {number} templateWidth - Width of the template image
- * @param {number} templateHeight - Height of the template image
- * @param {number} searchWidth - Width of the search image
- * @param {number} searchHeight - Height of the search image
- * @returns {Object} - Match result with position (x,y) and confidence (0-1)
- */
-function matchTemplate(
-  templateData,
-  searchData,
-  templateWidth,
-  templateHeight,
-  searchWidth,
-  searchHeight
-) {
-  // Initialize match result variables
-  let maxCorrelation = -Infinity;
-  let bestMatchX = -1;
-  let bestMatchY = -1;
-
-  // Make sure the search image is larger than or equal to the template image
-  if (searchWidth < templateWidth || searchHeight < templateHeight) {
-    console.error("Search image must be larger than or equal to template image");
-    return { x: -1, y: -1, confidence: 0 };
-  }
-
-  // Iterate over the search image to find the best match
-  for (let searchY = 0; searchY <= searchHeight - templateHeight; searchY += 1) {
-    for (let searchX = 0; searchX <= searchWidth - templateWidth; searchX += 1) {
-
-      // Calculate the correlation for the current position
-      let correlationSum = 0;
-      let templateSquareSum = 0;
-      let searchSquareSum = 0;
-
-      // Iterate over the template image pixels
-      for (let templateY = 0; templateY < templateHeight; templateY += 1) {
-        for (let templateX = 0; templateX < templateWidth; templateX += 1) {
-          const templatePixel = templateData[templateY * templateWidth + templateX];
-          const searchPixel = searchData[(searchY + templateY) * searchWidth + (searchX + templateX)];
-
-          correlationSum += templatePixel * searchPixel;
-          templateSquareSum += templatePixel ** 2;
-          searchSquareSum += searchPixel ** 2;
-        }
-      }
-
-      // Normalize the correlation value
-      const denominator = Math.sqrt(templateSquareSum * searchSquareSum);
-      const normalizedCorrelation = denominator > 0 ? correlationSum / denominator : -1;
-
-      // Update the best match if the current correlation is higher
-      if (maxCorrelation < normalizedCorrelation) {
-        maxCorrelation = normalizedCorrelation;
-        bestMatchX = searchX;
-        bestMatchY = searchY;
-      }
-    }
-  }
-
-  // Normalize the correlation value to a confidence score between 0 and 1
-  const confidence = maxCorrelation === -Infinity ? 0 : (maxCorrelation + 1) / 2;
-
-  return {
-    x: bestMatchX,
-    y: bestMatchY,
-    confidence
-  };
-}
-
-/**
  * Convert color image to grayscale
  * 
  * @param {ImageBitmap} imageBitmap - Source color image
@@ -161,89 +87,51 @@ function convertToGrayscale(imageBitmap) {
   };
 }
 
-function captureVisibleTab() {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      if (tabs.length === 0) {
-        reject(new Error('No active tab found'));
-        return;
-      }
-      const tab = tabs[0];
-      chrome.tabs.captureVisibleTab(tab.windowId, { format: "png", quality: 60 }, async (image) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-        } else {
-          const imageBitmap = await createImageBitmap(base64ToBlob(image));
-          resolve({ imageBitmap, host: getHost(tab.url) });
-        }
-      });
+function generateHash(grayPixels, avg) {
+  let hash = 0n;
+  grayPixels.forEach((val, i) => {
+    if (val > avg) {
+      hash |= 1n << BigInt(63 - i);
     }
-    );
   });
+  return hash;
 }
 
-function cropImage(imageBitmap, x, y, width, height) {
-  return createImageBitmap(
-    imageBitmap,
-    x, y,
-    width, height
-  );
+function hammingDistance(hash1, hash2) {
+  const diff = hash1 ^ hash2;
+  return diff.toString(2).replace(/0/g, '').length;
 }
 
-function grayscaleToImageData(grayscaleData, width, height) {
-  const canvas = new OffscreenCanvas(width, height);
-  const ctx = canvas.getContext('2d');
-  const imageData = ctx.createImageData(width, height);
-
-  // 将灰度值转换为RGBA
-  for (let i = 0; i < grayscaleData.length; i++) {
-    const value = grayscaleData[i];
-    // RGBA格式 - 对于每个像素设置相同的RGB值以保持灰度
-    imageData.data[i * 4] = value;     // R
-    imageData.data[i * 4 + 1] = value; // G
-    imageData.data[i * 4 + 2] = value; // B
-    imageData.data[i * 4 + 3] = 255;   // A (完全不透明)
-  }
-
-  ctx.putImageData(imageData, 0, 0);
-  return canvas.convertToBlob({ type: 'image/png' });
+function calcSimilarity(image1, image2) {
+  const distance = hammingDistance(
+    generateHash(image1, image1.reduce((a, b) => a + b) / image1.length),
+    generateHash(image2, image2.reduce((a, b) => a + b) / image2.length)
+  )
+  return 1 - (distance / 64);
 }
 
-async function markAds() {
-  // Create image bitmap from screenshot
-  const { imageBitmap, host } = await captureVisibleTab();
-
-  // Define crop dimensions (100x100 from center)
-  const cropSize = 37;
-  const cropX = Math.floor((imageBitmap.width - cropSize) / 2);
-  const cropY = Math.floor((imageBitmap.height - cropSize) / 2);
-
-  // Create cropped image bitmap
-  const croppedBitmap = await cropImage(imageBitmap, cropX, cropY, cropSize, cropSize);
-
-  // Convert cropped image to grayscale
-  const grayscaleImage = convertToGrayscale(croppedBitmap);
+async function saveAdsTemplate(templateFrame, tab, duration = 3700) {
+  imageBitmap = await createImageBitmap(base64ToBlob(templateFrame));
+  const grayscaleImage = convertToGrayscale(imageBitmap);
 
   // Store the template
   const db = await openDB();
   const transaction = db.transaction(STORE_NAME, 'readwrite');
   const store = transaction.objectStore(STORE_NAME);
+  const host = getHost(tab.url);
   if (!host) {
-    console.error('Failed to extract host from URL:', tab[0].url);
+    console.error('Failed to extract host from URL:', tab.url);
     return;
   }
 
-  const adsId = Date.now();
   store.put({
-    id: adsId,
+    id: Date.now(),
     imageData: grayscaleImage.data, // Store grayscale data for faster matching
-    width: cropSize,
-    height: cropSize,
     host,
-    duration: 3700
+    width: grayscaleImage.width, // size info will be used for matching
+    height: grayscaleImage.height,
+    duration
   });
-
-  return adsId;
 }
 
 function getActiveTab() {
@@ -260,24 +148,31 @@ function getActiveTab() {
   });
 }
 
+function grayscaleToImageData(grayscaleData, width, height) {
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+  const imageData = ctx.createImageData(width, height);
+
+  for (let i = 0; i < grayscaleData.length; i++) {
+    const value = grayscaleData[i];
+    imageData.data[i * 4] = value;     // R
+    imageData.data[i * 4 + 1] = value; // G
+    imageData.data[i * 4 + 2] = value; // B
+    imageData.data[i * 4 + 3] = 255;   // A
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+  return canvas.convertToBlob({ type: 'image/png' });
+}
+
 
 chrome.commands.onCommand.addListener((command) => {
   if (command === 'markAds') {
     console.log("Mark Ads command triggered");
-
     getActiveTab().then(tab => {
-      markAds().then((adsId) => {
-        chrome.tabs.sendMessage(tab.id, {
-          action: "openSetDurationForm",
-          adsId
-        });
-      }).catch(err => {
-        console.error("Error marking ads:", err);
-        chrome.tabs.sendMessage(tab.id, {
-          action: "toast",
-          content: "Error marking ads: " + err.message
-        });
-      })
+      chrome.tabs.sendMessage(tab.id, {
+        action: "markAds",
+      });
     })
   }
   else if (command === 'enableAdsCheck') {
@@ -293,15 +188,43 @@ chrome.commands.onCommand.addListener((command) => {
 })
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === 'markAds') {
-    console.log("Mark Ads message received");
-    markAds().then(() => {
-      console.log("Ads marked successfully");
-      sendResponse({ status: 'success', message: 'Ads marked successfully' });
-    }).catch(err => {
-      console.error("Error marking ads:", err);
-      sendResponse({ status: 'error', message: 'Error marking ads: ' + err.message });
+  if (message.action === 'cleanAds') {
+    console.log("Clean Ads message received");
+    openDB().then(db => {
+      getActiveTab().then(activeTab => {
+        const transaction = db.transaction(STORE_NAME, 'readwrite');
+        const store = transaction.objectStore(STORE_NAME);
+        const activeHost = getHost(activeTab.url);
+        if (!activeHost) {
+          sendResponse({ status: 'error', message: 'Invalid active tab URL' });
+          return;
+        }
+        const index = store.index('host');
+        const request = index.openCursor(IDBKeyRange.only(activeHost));
+        request.onsuccess = (event) => {
+          const cursor = event.target.result;
+          if (cursor) {
+            cursor.delete();
+            cursor.continue();
+          } else {
+            sendResponse({ status: 'success', message: 'Ads templates deleted successfully' });
+          }
+        };
+        request.onerror = () => {
+          console.error('Error retrieving ads templates:', request.error);
+          sendResponse({ status: 'error', message: 'Failed to retrieve ads templates' });
+        };
+      }).catch(err => {
+        console.error('Database error:', err);
+        sendResponse({ status: 'error', message: 'Database error' });
+      });
     })
+  } else if (message.action === 'markAds') {
+    console.log("Mark Ads message received");
+    const tab = sender.tab;
+    chrome.tabs.sendMessage(tab.id, {
+      action: "markAds",
+    });
   }
   else if (message.action === 'checkAds') {
     console.log("Check Ads message received");
@@ -323,30 +246,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       request.onsuccess = async () => {
         const templates = request.result;
-        const { imageBitmap } = await captureVisibleTab();
-        const cropSize = 100;
-        const cropX = Math.max(Math.floor((imageBitmap.width - cropSize) / 2), 0);
-        const cropY = Math.max(Math.floor((imageBitmap.height - cropSize) / 2), 0);
-        const searchBitmap = await cropImage(imageBitmap, cropX, cropY, Math.min(cropSize, imageBitmap.width), Math.min(cropSize, imageBitmap.height));
+        const searchBitmap = await createImageBitmap(base64ToBlob(message.videoFrame));
         const searchBitmapGrayscale = convertToGrayscale(searchBitmap);
 
         const templateMatched = templates.find(template => {
-          const matchResult = matchTemplate(
-            template.imageData,
-            searchBitmapGrayscale.data,
-            template.width,
-            template.height,
-            searchBitmapGrayscale.width,
-            searchBitmapGrayscale.height
-          );
+          const similarity = calcSimilarity(template.imageData, searchBitmapGrayscale.data);
+          console.log(`Template ${template.id} similarity:`, similarity);
 
-          // Check if confidence is above a threshold (e.g., 0.8)
-          return matchResult.confidence > 0.8;
+          return similarity > ADS_THRESHOLD;
         });
+
         console.log("Ads found:", templateMatched);
         sendResponse({
           status: 'success',
-          data: { adsFound: !!templateMatched, duration: templateMatched.duration }
+          data: { adsFound: !!templateMatched, duration: templateMatched?.duration, adsId: templateMatched?.id }
         });
       };
 
@@ -357,37 +270,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       console.error('Database error:', err);
       sendResponse({ status: 'error', message: 'Database error' });
     });
-  } else if (message.action === 'updateDuration') {
-    console.log("Update Duration message received");
-    openDB().then(db => {
-      const transaction = db.transaction(STORE_NAME, 'readwrite');
-      const store = transaction.objectStore(STORE_NAME);
-      const adsId = message.adsId;
-      const duration = message.duration;
+  } else if (message.action === 'saveAdsTemplate') {
+    console.log("Save ads message received");
+    const templateFrame = message.templateFrame;
+    const duration = message.duration;
 
-      store.get(adsId).onsuccess = (event) => {
-        const adTemplate = event.target.result;
-        if (adTemplate) {
-          adTemplate.duration = duration;
-          store.put(adTemplate).onsuccess = () => {
-            console.log("Duration updated successfully");
-            sendResponse({ status: 'success', message: 'Duration updated successfully' });
-          };
-        } else {
-          console.error("Ad template not found for ID:", adsId);
-          sendResponse({ status: 'error', message: 'Ad template not found' });
-        }
-      };
-
-      transaction.onerror = () => {
-        console.error("Transaction error:", transaction.error);
-        sendResponse({ status: 'error', message: 'Failed to update duration' });
-      };
+    saveAdsTemplate(templateFrame, sender.tab, duration).then(() => {
+      sendResponse({ status: 'success', message: 'Template saved successfully' });
     }).catch(err => {
       console.error('Database error:', err);
       sendResponse({ status: 'error', message: 'Database error' });
     });
-
   }
 
   return true; // Keep the message channel open for sendResponse
