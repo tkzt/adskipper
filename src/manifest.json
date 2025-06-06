@@ -1,5 +1,5 @@
 {
-    "name": "adskipper",
+    "name": "Adskipper",
     "version": "0.1",
     "manifest_version": 3,
     "description": "Skips ads according to snapshots recorded by the user.",
