@@ -1,6 +1,10 @@
-# Adskipper
-
-Automatically skip ads according to frames marked beforehand when watching videos.
+<p align="center">
+    <img src="res/adskipper.svg" width="64" />
+    <br>
+    <h1 align="center">Adskipper</h1>
+    <br>
+    <div align="center">Automatically skip ads according to frames marked beforehand when playing videos.</div>
+</p>
 
 ## Key Features
 
