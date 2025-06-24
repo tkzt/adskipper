@@ -1,6 +1,6 @@
 {
     "name": "Adskipper",
-    "version": "0.1",
+    "version": "0.2",
     "manifest_version": 3,
     "description": "Skips ads according to snapshots recorded by the user.",
     "author": "allen@tkzt.cn",

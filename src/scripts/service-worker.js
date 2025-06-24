@@ -221,10 +221,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })
   } else if (message.action === 'markAds') {
     console.log("Mark Ads message received");
-    const tab = sender.tab;
-    chrome.tabs.sendMessage(tab.id, {
-      action: "markAds",
-    });
+    getActiveTab().then(tab => {
+      chrome.tabs.sendMessage(tab.id, {
+        action: "markAds",
+      });
+    })
   }
   else if (message.action === 'checkAds') {
     console.log("Check Ads message received");
