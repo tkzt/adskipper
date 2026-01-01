@@ -360,7 +360,10 @@ function checkAdsTimer() {
     }
     console.log("No ads found, continuing to check.");
     setTimeout(checkAdsTimer, DETECT_ADS_INTERVAL);
-  })
+  }).catch((error) => {
+    console.error("Error during ads checking:", error);
+    setTimeout(checkAdsTimer, DETECT_ADS_INTERVAL);
+  });
 
 }
 
