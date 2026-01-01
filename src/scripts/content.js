@@ -16,6 +16,7 @@ window.__unocss = {
 const DETECT_ADS_INTERVAL = 1000; // 1 second
 let adsDetectingEnabled = false;
 let templateFrame = null;
+let templateRegion = null; // { x, y, w, h } in intrinsic video pixels
 
 function videoSpeedUp(duration) {
   const video = getVideoElement();
@@ -75,13 +76,251 @@ function captureVideoFrame(frameSize) {
     console.error("Failed to get canvas context");
     return null;
   }
+  // legacy behavior: capture bottom-right square of intrinsic video pixels
   context.drawImage(video, video.videoWidth - frameSize, video.videoHeight - frameSize, frameSize, frameSize, 0, 0, frameSize, frameSize);
   const base64Image = canvas.toDataURL('image/png');
   return base64Image;
 }
 
+// Create a full-screen selection overlay that draws the current video frame
+// and allows the user to box-select a region. Once selection confirmed, it
+// calls onConfirm(base64Image) with a normalized 150x150 image of that region.
+function openSelectionOverlay(onConfirm, onCancel) {
+  const video = getVideoElement();
+  if (!video) {
+    toast('No video element found to select region');
+    return;
+  }
+
+  // Pause video while selecting
+  try { video.pause(); } catch (e) { }
+
+  const root = getRootElement();
+  const overlay = document.createElement('div');
+  overlay.style.position = 'fixed';
+  overlay.style.left = '0';
+  overlay.style.top = '0';
+  overlay.style.width = '100vw';
+  overlay.style.height = '100vh';
+  overlay.style.zIndex = '2147483647';
+  overlay.style.background = 'rgba(0,0,0,0.25)';
+  overlay.style.display = 'flex';
+  overlay.style.alignItems = 'center';
+  overlay.style.justifyContent = 'center';
+  overlay.style.cursor = 'crosshair';
+
+  // Canvas matching the video's displayed size
+  const videoRect = video.getBoundingClientRect();
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(videoRect.width));
+  canvas.height = Math.max(1, Math.round(videoRect.height));
+  canvas.style.width = canvas.width + 'px';
+  canvas.style.height = canvas.height + 'px';
+  canvas.style.position = 'absolute';
+  canvas.style.left = (videoRect.left) + 'px';
+  canvas.style.top = (videoRect.top) + 'px';
+  canvas.style.boxShadow = '0 0 0 10000px rgba(0,0,0,0.25)';
+  canvas.style.border = '2px solid rgba(255,255,255,0.8)';
+  canvas.style.background = 'transparent';
+  overlay.appendChild(canvas);
+  root.appendChild(overlay);
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    toast('Failed to create canvas context');
+    overlay.remove();
+    try { video.play(); } catch (e) { }
+    return;
+  }
+
+  // Draw current video frame scaled to displayed size
+  function drawFrame() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight, 0, 0, canvas.width, canvas.height);
+  }
+  drawFrame();
+
+  // Selection state
+  let selecting = false;
+  let startX = 0, startY = 0, curX = 0, curY = 0;
+
+  function getRect() {
+    const x = Math.min(startX, curX);
+    const y = Math.min(startY, curY);
+    const w = Math.abs(curX - startX);
+    const h = Math.abs(curY - startY);
+    return { x, y, w, h };
+  }
+
+  function redraw() {
+    drawFrame();
+    const r = getRect();
+    if (r.w > 0 && r.h > 0) {
+      // dim outside selection
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.4)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(r.x, r.y, r.w, r.h);
+      ctx.restore();
+
+      // draw stroke
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+      ctx.restore();
+    }
+  }
+
+  function toIntrinsic(rect) {
+    // Map from displayed canvas coords to video intrinsic pixels
+    const scaleX = video.videoWidth / canvas.width;
+    const scaleY = video.videoHeight / canvas.height;
+    return {
+      x: Math.round(rect.x * scaleX),
+      y: Math.round(rect.y * scaleY),
+      w: Math.max(1, Math.round(rect.w * scaleX)),
+      h: Math.max(1, Math.round(rect.h * scaleY)),
+    };
+  }
+
+  function finishSelection() {
+    const r = getRect();
+    if (r.w <= 0 || r.h <= 0) {
+      // nothing selected -> treat as cancel
+      cleanup();
+      onCancel && onCancel();
+      return;
+    }
+    const intrinsic = toIntrinsic(r);
+
+    // create 150x150 normalized image of selected region
+    const tmp = document.createElement('canvas');
+    tmp.width = 150;
+    tmp.height = 150;
+    const tctx = tmp.getContext('2d');
+    tctx.drawImage(video, intrinsic.x, intrinsic.y, intrinsic.w, intrinsic.h, 0, 0, 150, 150);
+    const base64 = tmp.toDataURL('image/png');
+
+    cleanup();
+    // return both base64 and intrinsic region so we can reuse same crop later
+    onConfirm && onConfirm(base64, intrinsic);
+  }
+
+  function cleanup() {
+    overlay.remove();
+    canvas.removeEventListener('mousedown', onMouseDown);
+    window.removeEventListener('mousemove', onMouseMove);
+    window.removeEventListener('mouseup', onMouseUp);
+    // resume handled by caller when needed
+  }
+
+  function onMouseDown(e) {
+    selecting = true;
+    // coordinates relative to canvas
+    const rect = canvas.getBoundingClientRect();
+    startX = e.clientX - rect.left;
+    startY = e.clientY - rect.top;
+    curX = startX; curY = startY;
+    redraw();
+  }
+  function onMouseMove(e) {
+    if (!selecting) return;
+    const rect = canvas.getBoundingClientRect();
+    curX = Math.max(0, Math.min(canvas.width, e.clientX - rect.left));
+    curY = Math.max(0, Math.min(canvas.height, e.clientY - rect.top));
+    redraw();
+  }
+  function onMouseUp(e) {
+    if (!selecting) return;
+    selecting = false;
+    // finalize selection and ask for confirmation (simple double-click alternative)
+    // show a small inline confirm/cancel UI near canvas center
+    const r = getRect();
+    if (r.w <= 0 || r.h <= 0) {
+      cleanup();
+      onCancel && onCancel();
+      return;
+    }
+
+    // Create simple confirmation UI
+    const confirmBox = document.createElement('div');
+    confirmBox.style.position = 'fixed';
+    confirmBox.style.left = (videoRect.left + (videoRect.width / 2) - 120) + 'px';
+    confirmBox.style.top = (videoRect.top + (videoRect.height / 2) - 30) + 'px';
+    confirmBox.style.zIndex = '2147483648';
+    confirmBox.style.display = 'flex';
+    confirmBox.style.gap = '8px';
+    confirmBox.style.background = 'rgba(0,0,0,0.6)';
+    confirmBox.style.padding = '8px';
+    confirmBox.style.borderRadius = '8px';
+
+    const ok = document.createElement('button');
+    ok.textContent = 'Confirm';
+    ok.style.cursor = 'pointer';
+    ok.addEventListener('click', () => {
+      confirmBox.remove();
+      finishSelection();
+    });
+    const cancel = document.createElement('button');
+    cancel.textContent = 'Cancel';
+    cancel.style.cursor = 'pointer';
+    cancel.addEventListener('click', () => {
+      confirmBox.remove();
+      cleanup();
+      onCancel && onCancel();
+    });
+    confirmBox.appendChild(ok);
+    confirmBox.appendChild(cancel);
+    root.appendChild(confirmBox);
+  }
+
+  canvas.addEventListener('mousedown', onMouseDown);
+  window.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('mouseup', onMouseUp);
+
+  // allow escape to cancel
+  function onKey(e) {
+    if (e.key === 'Escape') {
+      cleanup();
+      try { video.play(); } catch (err) { }
+      window.removeEventListener('keydown', onKey);
+      onCancel && onCancel();
+    }
+  }
+  window.addEventListener('keydown', onKey);
+}
+
 function checkAds(adsId) {
-  const videoFrame = captureVideoFrame(150);
+  const video = getVideoElement();
+  if (!video) {
+    console.error("No video element found to capture frame for checking ads");
+    return Promise.resolve(null);
+  }
+
+  function captureRegion(region) {
+    try {
+      const tmp = document.createElement('canvas');
+      tmp.width = 150;
+      tmp.height = 150;
+      const tctx = tmp.getContext('2d');
+      tctx.drawImage(video, region.x, region.y, region.w, region.h, 0, 0, 150, 150);
+      return tmp.toDataURL('image/png');
+    } catch (e) {
+      console.error('Failed to capture region:', e);
+      return null;
+    }
+  }
+
+  let videoFrame = null;
+  if (templateRegion) {
+    videoFrame = captureRegion(templateRegion);
+  }
+  // fallback to legacy fixed capture if no templateRegion
+  if (!videoFrame) {
+    videoFrame = captureVideoFrame(150);
+  }
+
   return new Promise((resolve) => {
     chrome.runtime.sendMessage({
       action: "checkAds",
@@ -184,6 +423,7 @@ function markAds() {
       action: "saveAdsTemplate",
       duration,
       templateFrame,
+      templateRegion,
     }, (response) => {
       if (response.status === 'success') {
         formOverlay.remove();
@@ -221,9 +461,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     checkAdsTimer();
     sendResponse({ status: "success" });
   } else if (message.action === 'markAds') {
-    console.log("Opening set duration form");
-    templateFrame = captureVideoFrame(150);
-    markAds();
+    console.log("Opening selection overlay for marking ads");
+    const video = getVideoElement();
+    if (!video) {
+      toast('No video element found to mark ads');
+      return;
+    }
+    openSelectionOverlay((base64, intrinsic) => {
+      // user confirmed selection; set template and open duration form
+      templateFrame = base64;
+      templateRegion = intrinsic;
+      markAds();
+    }, () => {
+      // user cancelled selection
+      try { video.play(); } catch (e) { }
+      toast('Selection cancelled');
+    });
   }
   return true;
 });
