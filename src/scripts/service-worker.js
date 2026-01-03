@@ -4,7 +4,7 @@ const ADS_THRESHOLD = 0.95; // Confidence threshold for ad detection
 
 function openDB() {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(ADS_DB_KEY, 1);
+    const request = indexedDB.open(ADS_DB_KEY, 2);
     request.onupgradeneeded = (event) => {
       const db = event.target.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
@@ -110,7 +110,45 @@ function calcSimilarity(image1, image2) {
   return 1 - (distance / 64);
 }
 
-async function saveAdsTemplate(templateFrame, tab, duration = 3700) {
+/**
+ * Compute a 64-bit perceptual hash (pHash-like) from an ImageBitmap by downscaling to 8x8.
+ * Returns a BigInt representing the 64-bit hash.
+ * @param {ImageBitmap} imageBitmap
+ * @returns {BigInt}
+ */
+function getPHashFromImageBitmap(imageBitmap) {
+  const size = 8;
+  const canvas = new OffscreenCanvas(size, size);
+  const ctx = canvas.getContext('2d');
+  // draw and scale down to 8x8
+  ctx.drawImage(imageBitmap, 0, 0, size, size);
+  const imgData = ctx.getImageData(0, 0, size, size).data;
+  const gray = new Uint8Array(size * size);
+  for (let i = 0; i < size * size; i++) {
+    const r = imgData[i * 4];
+    const g = imgData[i * 4 + 1];
+    const b = imgData[i * 4 + 2];
+    gray[i] = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+  }
+  const avg = gray.reduce((a, b) => a + b, 0) / gray.length;
+  return generateHash(gray, avg);
+}
+
+/**
+ * Compute pHash from stored grayscale data by rebuilding an Image and downscaling to 8x8.
+ * @param {Uint8Array} grayscaleData
+ * @param {number} width
+ * @param {number} height
+ * @returns {Promise<BigInt>}
+ */
+async function getPHashFromGrayscaleData(grayscaleData, width, height) {
+  // rebuild a PNG blob from grayscale and compute the pHash from its ImageBitmap
+  const blob = await grayscaleToImageData(grayscaleData, width, height);
+  const bitmap = await createImageBitmap(blob);
+  return getPHashFromImageBitmap(bitmap);
+}
+
+async function saveAdsTemplate(templateFrame, templateRegion, tab, duration = 3700) {
   imageBitmap = await createImageBitmap(base64ToBlob(templateFrame));
   const grayscaleImage = convertToGrayscale(imageBitmap);
 
@@ -130,6 +168,7 @@ async function saveAdsTemplate(templateFrame, tab, duration = 3700) {
     host,
     width: grayscaleImage.width, // size info will be used for matching
     height: grayscaleImage.height,
+    region: templateRegion,
     duration
   });
 }
@@ -248,20 +287,89 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       request.onsuccess = async () => {
         const templates = request.result;
         const searchBitmap = await createImageBitmap(base64ToBlob(message.videoFrame));
-        const searchBitmapGrayscale = convertToGrayscale(searchBitmap);
+        const debugMode = !!message.debug;
 
-        const templateMatched = templates.find(template => {
-          const similarity = calcSimilarity(template.imageData, searchBitmapGrayscale.data);
+        // iterate templates sequentially so we can await blob/image operations
+        let templateMatched = null;
+        let debugTemplateBase64 = null;
+        let debugSearchRegionBase64 = null;
+
+        for (const template of templates) {
+          // cut the same region with the template out
+          const templateWidth = template.width;
+          const templateHeight = template.height;
+          const templateRegion = template.region;
+          const canvas = new OffscreenCanvas(templateWidth, templateHeight);
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(
+            searchBitmap,
+            templateRegion.x, templateRegion.y, templateRegion.w, templateRegion.h,
+            0, 0, templateWidth, templateHeight
+          );
+
+          // get the color/png blob of the search region (for debug)
+          const searchRegionBlob = await canvas.convertToBlob({ type: 'image/png' });
+
+          // compute robust 8x8 pHash for both template and search region
+          let similarity = 0;
+          try {
+            const templateHash = await getPHashFromGrayscaleData(template.imageData, template.width, template.height);
+            const searchBitmapForHash = await createImageBitmap(searchRegionBlob);
+            const searchHash = getPHashFromImageBitmap(searchBitmapForHash);
+            const distance = hammingDistance(templateHash, searchHash);
+            similarity = 1 - (distance / 64);
+          } catch (err) {
+            console.error('Failed to compute pHash similarity:', err);
+            similarity = 0;
+          }
           console.log(`Template ${template.id} similarity:`, similarity);
 
-          return similarity > ADS_THRESHOLD;
-        });
+          // build base64 strings for debugging only when requested to avoid heavy processing
+          if (debugMode) {
+            try {
+              const templateBlob = await grayscaleToImageData(template.imageData, template.width, template.height);
+              debugTemplateBase64 = await blobToBase64(templateBlob);
+            } catch (err) {
+              console.error('Failed to rebuild template image base64:', err);
+              debugTemplateBase64 = null;
+            }
+
+            try {
+              debugSearchRegionBase64 = await blobToBase64(searchRegionBlob);
+            } catch (err) {
+              console.error('Failed to convert search region to base64:', err);
+              debugSearchRegionBase64 = null;
+            }
+
+            // Print base64 strings for debugging (full strings). Be aware these can be large.
+            if (debugTemplateBase64) {
+              console.log(`Template ${template.id} base64:`, debugTemplateBase64);
+            }
+            if (debugSearchRegionBase64) {
+              console.log(`Search region for template ${template.id} base64:`, debugSearchRegionBase64);
+            }
+          }
+
+          if (similarity > ADS_THRESHOLD) {
+            templateMatched = template;
+            break;
+          }
+        }
 
         console.log("Ads found:", templateMatched);
-        sendResponse({
-          status: 'success',
-          data: { adsFound: !!templateMatched, duration: templateMatched?.duration, adsId: templateMatched?.id }
-        });
+        const responseData = {
+          adsFound: !!templateMatched,
+          duration: templateMatched?.duration,
+          adsId: templateMatched?.id
+        };
+        if (debugMode) {
+          responseData.debug = {
+            templateBase64: debugTemplateBase64,
+            searchRegionBase64: debugSearchRegionBase64
+          };
+        }
+
+        sendResponse({ status: 'success', data: responseData });
       };
 
       request.onerror = () => {
@@ -274,9 +382,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.action === 'saveAdsTemplate') {
     console.log("Save ads message received");
     const templateFrame = message.templateFrame;
+    const templateRegion = message.templateRegion;
     const duration = message.duration;
 
-    saveAdsTemplate(templateFrame, sender.tab, duration).then(() => {
+    saveAdsTemplate(templateFrame, templateRegion, sender.tab, duration).then(() => {
       sendResponse({ status: 'success', message: 'Template saved successfully' });
     }).catch(err => {
       console.error('Database error:', err);

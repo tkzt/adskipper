@@ -196,10 +196,10 @@ function openSelectionOverlay(onConfirm, onCancel) {
 
     // create 150x150 normalized image of selected region
     const tmp = document.createElement('canvas');
-    tmp.width = 150;
-    tmp.height = 150;
+    tmp.width = intrinsic.w;
+    tmp.height = intrinsic.h;
     const tctx = tmp.getContext('2d');
-    tctx.drawImage(video, intrinsic.x, intrinsic.y, intrinsic.w, intrinsic.h, 0, 0, 150, 150);
+    tctx.drawImage(video, intrinsic.x, intrinsic.y, intrinsic.w, intrinsic.h, 0, 0, intrinsic.w, intrinsic.h);
     const base64 = tmp.toDataURL('image/png');
 
     cleanup();
@@ -298,13 +298,13 @@ function checkAds(adsId) {
     return Promise.resolve(null);
   }
 
-  function captureRegion(region) {
+  function captureRegion() {
     try {
       const tmp = document.createElement('canvas');
-      tmp.width = 150;
-      tmp.height = 150;
+      tmp.width = video.videoWidth;
+      tmp.height = video.videoHeight;
       const tctx = tmp.getContext('2d');
-      tctx.drawImage(video, region.x, region.y, region.w, region.h, 0, 0, 150, 150);
+      tctx.drawImage(video, 0, 0);
       return tmp.toDataURL('image/png');
     } catch (e) {
       console.error('Failed to capture region:', e);
@@ -312,15 +312,7 @@ function checkAds(adsId) {
     }
   }
 
-  let videoFrame = null;
-  if (templateRegion) {
-    videoFrame = captureRegion(templateRegion);
-  }
-  // fallback to legacy fixed capture if no templateRegion
-  if (!videoFrame) {
-    videoFrame = captureVideoFrame(150);
-  }
-
+  let videoFrame = captureRegion();
   return new Promise((resolve) => {
     chrome.runtime.sendMessage({
       action: "checkAds",
